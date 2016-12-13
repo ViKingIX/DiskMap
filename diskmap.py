@@ -22,12 +22,21 @@
 
 VERSION="0.12b"
 
-import subprocess, re, os, sys, readline, cmd, pickle, glob
+import subprocess
+import re
+import os
+import sys
+import readline
+import cmd
+import pickle
+import glob
 from pprint import pformat, pprint
 pj = os.path.join
 
 from socket import gethostname
 hostname = gethostname()
+
+import multiprocessing
 
 cachefile = "/tmp/pouet"
 
@@ -76,6 +85,11 @@ def megabyze(i, fact=1000):
         if i < 2000: break
         i = i / fact
     return "%.1f%s"%(i, unit)
+
+def smartctl_body(disk):
+    params = ['-A', '/dev/rdsk/' + disk['device']]
+    #return run(smartctl, params)
+    return subprocess.check_output([smartctl, '-A', '/dev/rdsk/' + disk['device']])
 
 class SesManager(cmd.Cmd):
     def __init__(self, *l, **kv):
@@ -339,22 +353,33 @@ class SesManager(cmd.Cmd):
         pprint(self.controllers)
 
     def do_disks(self, line):
-        """Display detected disks. Use -v for verbose output"""
-        list = [ (",".join(v["path"]), v)
+        """Display detected disks. Use -v for verbose output, -t for additional temperature field"""
+        disks = [ (",".join(v["path"]), v)
                  for k,v in self.disks.items() ]
-        list.sort()
+        disks.sort()
         if line == "-v":
-            pprint (list)
+            pprint (disks)
             return
+        smart_outs = [None] * len(disks)
+        if '-t' in line:
+            pool = multiprocessing.Pool()
+            smart_outs = pool.map(smartctl_body, disks)
+            pool.close()
         totalsize = 0
-        for path, disk in list:
+        for (path, disk), smart_out in zip(disks, smart_outs):
             disk["cpath"] = path
             disk["device"] = disk["device"].replace("/dev/rdsk/", "")
             disk["readablesize"] = megabyze(disk["sizemb"]*1024*1024)
             disk["pzpool"] = " / ".join([ "%s: %s"%(k,v) for k,v in disk.get("zpool", {}).items() ])
             disk["alias"] = self.aliases.get(disk["enclosure"], disk["enclosure"]) + "/%02d"%disk["slot"]
             totalsize += disk["sizemb"]*1024*1024
-            print "{cpath}  {alias:<16} {device:<21}  {model:<16}  {readablesize:<6} {pzpool}".format(**disk)
+            disk['temp'] = ''
+            if '-t' in line:
+                try:
+                    disk['temp'] = re.search(r'Current Drive Temperature:\s*(\d+) C', smart_out).group(1) + ' C'
+                except:
+                    disk['temp'] = '? C'
+            print "{cpath}  {alias:<16} {device:<21}  {model:<16}  {readablesize:<6} {pzpool} {temp}".format(**disk)
         print "Drives : %s   Total Capacity : %s"%(len(self.disks), megabyze(totalsize))
 
     def smartctl(self, disks, action="status"):
